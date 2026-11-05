@@ -4,6 +4,8 @@ import { PanoViewer } from './viewer.js';
 import { store } from './store.js';
 import { buildViewerHtml } from './viewer-export.js';
 import { DEFAULT_PARAMS } from './compose.js';
+import { SphereCapture } from './capture.js';
+import { rotationMatrix, transpose3, mul3 } from './math.js';
 
 const $ = (s) => document.querySelector(s);
 const el = (tag, attrs = {}, ...kids) => {
@@ -55,7 +57,19 @@ const state = {
   quality: 96,
   result: null,
   building: false,
+  // Rundumaufnahme: gemeinsame Einstellungen aller Rundumfotos
+  rundum: { hfov: null, yaw: 0, pitch: 0, roll: 0, blendPower: 48, aligned: false, align: null },
 };
+const DEFAULT_RUNDUM = () => ({ hfov: null, yaw: 0, pitch: 0, roll: 0, blendPower: 48, aligned: false, align: null });
+const isRundum = () => state.photos.some((p) => p.isShot);
+const shots = () => state.photos.filter((p) => p.isShot);
+const RUNDUM_SLIDERS = [
+  { k: 'yaw', label: 'Blickrichtung „vorne“ drehen', min: -180, max: 180, step: 0.5, unit: '°' },
+  { k: 'pitch', label: 'Horizont hoch/runter', min: -15, max: 15, step: 0.1, unit: '°' },
+  { k: 'roll', label: 'Horizont kippen', min: -15, max: 15, step: 0.1, unit: '°' },
+  { k: 'hfov', label: 'Kamera-Sichtfeld', min: 30, max: 100, step: 0.1, unit: '°' },
+  { k: 'blendPower', label: 'Übergänge (weich ↔ scharf)', min: 4, max: 128, step: 1, unit: '' },
+];
 
 // ---------------------------------------------------------------------------
 // Worker mit Wiederherstellung (bei Abbruch oder Speicherfehler neu starten)
@@ -104,7 +118,7 @@ function restartWorker() {
 
 async function loadIntoWorker(ph) {
   try {
-    const info = await call('addImage', { id: ph.id, blob: ph.blob });
+    const info = await call('addImage', { id: ph.id, blob: ph.blob, shot: !!ph.isShot });
     Object.assign(ph, { ready: true, width: info.width, height: info.height, score: info.score, rollEst: info.roll });
     return info;
   } catch (err) {
@@ -127,9 +141,10 @@ async function saveNow() {
     await store.putPhoto({
       id: ph.id, name: ph.name, blob: ph.blob, thumb: ph.thumb, role: ph.role, dir: ph.dir,
       params: ph.params, order: ph.order,
+      isShot: !!ph.isShot, sensorR: ph.sensorR || null, R: ph.R || null, gain: ph.gain || null, hfovGuess: ph.hfovGuess || null,
     });
   }
-  await store.set('project', { title: state.title, res: state.res, quality: state.quality, selected: state.selected });
+  await store.set('project', { title: state.title, res: state.res, quality: state.quality, selected: state.selected, rundum: state.rundum });
 }
 
 // ---------------------------------------------------------------------------
@@ -200,8 +215,12 @@ function renderPhotos() {
   const box = $('#photos');
   box.replaceChildren();
   for (const ph of state.photos) {
-    const roleSel = el('select', { 'aria-label': 'Verwendung', onchange: (e) => { setRole(ph, e.target.value); renderPhotos(); renderEditor(); saveSoon(); schedulePreview(true); } },
-      ...ROLES.map(([v, t]) => el('option', { value: v, selected: ph.role === v }, t)));
+    const roles = ph.isShot ? [['shot', 'Rundumfoto'], ['off', 'Nicht verwenden']] : ROLES;
+    const roleSel = el('select', { 'aria-label': 'Verwendung', onchange: (e) => {
+        if (ph.isShot) { ph.role = e.target.value; state.rundum.aligned = false; } else setRole(ph, e.target.value);
+        renderPhotos(); renderEditor(); saveSoon(); schedulePreview(true);
+      } },
+      ...roles.map(([v, t]) => el('option', { value: v, selected: ph.role === v }, t)));
     const dirSel = ph.role === 'island'
       ? el('select', { 'aria-label': 'Richtung aus der Mitte', onchange: (e) => {
           ph.dir = e.target.value;
@@ -222,6 +241,13 @@ function renderPhotos() {
     box.append(card);
   }
   const a = anchor();
+  if (isRundum()) {
+    const n = shots().filter((p) => p.role === 'shot').length;
+    const singles = state.photos.filter((p) => !p.isShot).length;
+    $('#anchor-hint').textContent = `Rundumaufnahme: ${n} Fotos.` + (singles ? ` ${singles} Einzelfoto(s) werden dafür nicht verwendet.` : '') +
+      (state.rundum.aligned ? ' Ausgerichtet – weiter mit Schritt 2 oder 3.' : ' Noch nicht ausgerichtet – Schritt 2 „Ausrichten“.');
+    return;
+  }
   $('#anchor-hint').textContent = !state.photos.length
     ? 'Tipp: Alle Innenraumfotos eines Fahrzeugs auf einmal auswählen. Das Cockpit-Gesamtfoto wird automatisch als Anker vorgeschlagen.'
     : a ? `Anker: „${a.name}“. Weiter mit Schritt 2 „Ausrichten“.` : 'Bitte ein Foto als Anker (Cockpit) wählen.';
@@ -243,6 +269,7 @@ async function newVehicle() {
   state.photos = [];
   state.selected = null;
   state.result = null;
+  state.rundum = DEFAULT_RUNDUM();
   state.title = '';
   $('#inp-title').value = '';
   await store.clearPhotos();
@@ -258,7 +285,24 @@ async function newVehicle() {
 // ---------------------------------------------------------------------------
 // Ausrichten
 
+/** Gesamtkorrektur der Rundumaufnahme: neue Blickrichtung „vorne“ = alte Richtung (yaw, pitch, roll). */
+function rundumG() {
+  const r = state.rundum;
+  return transpose3(rotationMatrix(r.yaw, r.pitch, r.roll));
+}
+
 function activeLayers() {
+  if (isRundum()) {
+    const G = rundumG();
+    const r = state.rundum;
+    const hfov = r.hfov || shots()[0]?.hfovGuess || 53;
+    return shots()
+      .filter((p) => p.ready && p.role === 'shot')
+      .map((p) => ({
+        id: p.id, kind: 'shot',
+        params: { ...DEFAULT_PARAMS, R: mul3(G, (r.aligned && p.R) || p.sensorR), hfov, gain: (r.aligned && p.gain) || [1, 1, 1], blendPower: r.blendPower, feather: 0.02 },
+      }));
+  }
   return state.photos
     .filter((p) => p.ready && p.role !== 'off')
     .map((p) => ({ id: p.id, kind: p.role, params: p.params }));
@@ -270,6 +314,10 @@ function selectedPhoto() {
 }
 
 function renderEditor() {
+  const rund = isRundum();
+  $('#single-editor').hidden = rund;
+  $('#rundum-editor').hidden = !rund;
+  if (rund) return renderRundumEditor();
   const used = state.photos.filter((p) => p.role !== 'off');
   const sel = $('#sel-layer');
   const cur = selectedPhoto();
@@ -309,6 +357,155 @@ function renderEditor() {
         el('button', { 'aria-label': s.label + ' verringern', onclick: () => set(get() - fine, true) }, '−'),
         range,
         el('button', { 'aria-label': s.label + ' erhöhen', onclick: () => set(get() + fine, true) }, '+'))));
+  }
+}
+
+function sliderRow(s, get, setVal) {
+  const val = el('span', { class: 'val' });
+  const range = el('input', { type: 'range', min: s.min, max: s.max, step: s.step, value: get(), 'aria-label': s.label });
+  const show = () => { val.textContent = fmtNum(get(), s.step < 1 ? (s.step < 0.5 ? (s.step < 0.25 ? 1 : 2) : 1) : 0) + s.unit; };
+  const set = (v, final) => {
+    v = Math.max(s.min, Math.min(s.max, Number(v)));
+    setVal(v, final);
+    range.value = v;
+    show();
+  };
+  range.addEventListener('input', () => set(range.value, false));
+  range.addEventListener('change', () => set(range.value, true));
+  const fine = s.step < 0.5 ? s.step : 0.5;
+  show();
+  return el('div', { class: 'slider' },
+    el('label', {}, s.label), val,
+    el('div', { class: 'ctl' },
+      el('button', { 'aria-label': s.label + ' verringern', onclick: () => set(get() - fine, true) }, '−'),
+      range,
+      el('button', { 'aria-label': s.label + ' erhöhen', onclick: () => set(get() + fine, true) }, '+')));
+}
+
+function renderRundumEditor() {
+  const r = state.rundum;
+  if (!r.hfov) r.hfov = shots()[0]?.hfovGuess || 53;
+  const box = $('#rundum-sliders');
+  box.replaceChildren(...RUNDUM_SLIDERS.map((s) => sliderRow(s, () => r[s.k], (v, final) => {
+    r[s.k] = v;
+    schedulePreview(final);
+    saveSoon();
+  })));
+  renderAlignSummary();
+}
+
+function renderAlignSummary() {
+  const r = state.rundum, box = $('#align-summary');
+  box.className = 'score';
+  if (!r.aligned || !r.align) {
+    box.classList.add('mid');
+    box.textContent = 'Noch nicht ausgerichtet: Die Fotos liegen nur nach Bewegungssensor (wenige Grad ungenau, dadurch doppelte Kanten). „Automatisch ausrichten“ tippen.';
+    return;
+  }
+  const a = r.align;
+  const cls = a.usable === false ? 'bad' : a.score >= 0.85 && !a.weak.length ? 'good' : a.score >= 0.7 ? 'mid' : 'bad';
+  box.classList.add(cls);
+  box.replaceChildren(
+    el('div', {}, `Ausgerichtet in ${fmtTime(a.ms)}: Übereinstimmung der Überlappungen ${fmtNum(a.score, 2)} (1 = perfekt), Kamera-Sichtfeld ${fmtNum(a.hfov, 1)}°` + (a.fovOk ? '' : ' (nicht sicher bestimmt – ggf. Regler „Kamera-Sichtfeld“ prüfen)') + '.'),
+    a.weak.length ? el('div', {}, 'Schlecht passende Nachbarn (Bewegung, Parallaxe oder strukturlose Fläche): ' + a.weak.join(', ') + '. Dort im Viewer auf doppelte Kanten achten; ggf. das Foto unter „Fotos“ auf „Nicht verwenden“ stellen.') : null,
+    a.usable === false ? el('div', {}, 'Der Bildvergleich hat nicht funktioniert (Fotos zu verwackelt, zu dunkel oder ohne Überlappung). Es werden nur die Sensorwerte verwendet – an den Übergängen sind doppelte Kanten wahrscheinlich. Am besten neu aufnehmen.') : null,
+    a.usable !== false && a.kept ? el('div', {}, `${a.kept} Foto(s) passten im Bildvergleich nicht und behalten ihre Sensor-Lage.`) : null,
+  );
+}
+
+async function alignRundum() {
+  const list = shots().filter((p) => p.ready && p.role === 'shot');
+  if (list.length < 2) { setStatus('Zu wenige Rundumfotos zum Ausrichten.'); return false; }
+  const btn = $('#btn-align-shots');
+  btn.disabled = true;
+  const prog = $('#align-progress');
+  prog.hidden = false;
+  const show = (m) => {
+    prog.querySelector('.progress-label').textContent = m.label || '';
+    prog.querySelector('.fill').style.width = (Math.min(0.99, m.frac) * 100).toFixed(1) + '%';
+    prog.querySelector('.progress-meta').textContent = `${Math.floor(Math.min(0.99, m.frac) * 100)} %` + (m.etaMs != null ? ` · noch ca. ${fmtTime(m.etaMs)}` : '');
+  };
+  show({ label: 'Starte Ausrichtung …', frac: 0 });
+  try {
+    const hfov = state.rundum.hfov || list[0].hfovGuess || 53;
+    const r = await call('align', { shots: list.map((p) => ({ id: p.id, R: p.sensorR })), hfov }, show);
+    const byId = Object.fromEntries(list.map((p) => [p.id, p]));
+    // Absicherung: Ist der Bildvergleich insgesamt unbrauchbar (z. B. verwackelt, zu dunkel), bleiben
+    // die Sensorwerte. Einzelne Fotos, die > 10° vom Sensor wegrutschen, behalten ebenfalls ihren Sensorwert.
+    const usable = (r.score ?? 0) >= 0.5;
+    let kept = 0;
+    r.ids.forEach((id, k) => {
+      const ok = usable && r.sensorDeviation[k] <= 10;
+      byId[id].R = ok ? r.Rs[k] : byId[id].sensorR;
+      byId[id].gain = usable ? r.gains[k] : [1, 1, 1];
+      if (!ok) kept++;
+    });
+    const name = (k) => byId[r.ids[k]].name.replace('Rundum ', '#');
+    state.rundum.hfov = r.hfov;
+    state.rundum.aligned = true;
+    state.rundum.align = {
+      score: r.score ?? 0, hfov: usable ? r.hfov : (list[0].hfovGuess || r.hfov), fovOk: usable && !!(r.fov && r.fov.ok), ms: r.ms,
+      weak: r.pairs.filter((p) => p.ncc != null && p.ncc < 0.6).map((p) => `${name(p.i)}–${name(p.j)} (${fmtNum(p.ncc, 2)})`),
+      maxDev: Math.max(0, ...r.sensorDeviation), pairs: r.pairs.length,
+      usable, kept,
+    };
+    if (!usable) state.rundum.hfov = list[0].hfovGuess || r.hfov;
+    setStatus(usable ? `Ausgerichtet: Übereinstimmung ${fmtNum(r.score ?? 0, 2)}, Sichtfeld ${fmtNum(r.hfov, 1)}°.`
+      : `Ausgerichtet nur nach Sensor: Bildvergleich unbrauchbar (Übereinstimmung ${fmtNum(r.score ?? 0, 2)}).`);
+    await saveNow();
+    renderEditor();
+    renderPhotos();
+    schedulePreview(true);
+    return true;
+  } catch (err) {
+    if (err.message !== 'abgebrochen') setStatus('Ausrichten fehlgeschlagen: ' + err.message);
+    return false;
+  } finally {
+    btn.disabled = false;
+    prog.hidden = true;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Rundumaufnahme (Kamera + Bewegungssensor)
+
+let capture = null;
+async function addShot(shot) {
+  const n = shots().length + 1;
+  const ph = {
+    id: uid(), name: `Rundum ${String(n).padStart(2, '0')}`, blob: shot.blob, thumb: await makeThumb(shot.blob),
+    role: 'shot', isShot: true, sensorR: shot.R, R: null, gain: null, hfovGuess: shot.hfovGuess,
+    params: { ...DEFAULT_PARAMS }, order: state.photos.length, ready: false,
+  };
+  state.photos.push(ph);
+  if (!state.rundum.hfov) state.rundum.hfov = shot.hfovGuess;
+  state.rundum.aligned = false;
+  await loadIntoWorker(ph);
+  await store.putPhoto({
+    id: ph.id, name: ph.name, blob: ph.blob, thumb: ph.thumb, role: ph.role, params: ph.params, order: ph.order,
+    isShot: true, sensorR: ph.sensorR, R: null, gain: null, hfovGuess: ph.hfovGuess,
+  });
+  return ph;
+}
+
+async function startCapture() {
+  if (shots().length) {
+    if (!confirm('Vorhandene Rundumfotos dieses Fahrzeugs löschen und neu aufnehmen?')) return;
+    for (const ph of shots()) { call('removeImage', { id: ph.id }).catch(() => {}); await store.deletePhoto(ph.id); }
+    state.photos = state.photos.filter((p) => !p.isShot);
+    state.rundum = DEFAULT_RUNDUM();
+  }
+  capture.open();
+}
+
+async function onCaptureClosed(count) {
+  renderPhotos();
+  await saveNow();
+  if (count >= 2) {
+    go('ausrichten');
+    await alignRundum();
+  } else if (count === 1) {
+    setStatus('Nur ein Foto aufgenommen – für ein Rundumbild bitte alle Richtungen aufnehmen.');
   }
 }
 
@@ -369,7 +566,7 @@ function schedulePreview(hi) {
 async function runPreview(W) {
   if (previewBusy) { previewAgain = Math.max(previewAgain || 0, W); return; }
   const layers = activeLayers();
-  if (!layers.some((l) => l.kind === 'anchor')) return;
+  if (!layers.some((l) => l.kind === 'anchor' || l.kind === 'shot')) return;
   previewBusy = true;
   $('#preview-busy').hidden = false;
   try {
@@ -404,9 +601,16 @@ function renderOverlapHint() {
 
 let wakeLock = null;
 async function build() {
+  if (isRundum() && !state.rundum.aligned) {
+    setStatus('Rundumfotos werden zuerst ausgerichtet …');
+    go('ausrichten');
+    const ok = await alignRundum();
+    go('erstellen');
+    if (!ok) return;
+  }
   const layers = activeLayers();
-  if (!layers.some((l) => l.kind === 'anchor')) {
-    setStatus('Bitte zuerst einen Anker wählen (Schritt 1).');
+  if (!layers.some((l) => l.kind === 'anchor' || l.kind === 'shot')) {
+    setStatus('Bitte zuerst einen Anker wählen oder eine Rundumaufnahme machen (Schritt 1).');
     return go('fotos');
   }
   state.building = true;
@@ -458,7 +662,7 @@ function cancelBuild() {
 
 function makeReport(r, layers) {
   const names = Object.fromEntries(state.photos.map((p) => [p.id, p.name]));
-  const kinds = { anchor: 'Anker', island: 'Insel' };
+  const kinds = { anchor: 'Anker', island: 'Insel', shot: 'Rundumfoto' };
   const resLines = r.layerInfo.map((L) => {
     const f = L.srcPxPerDeg / L.panoPxPerDeg;
     const what = f >= 1
@@ -471,10 +675,16 @@ function makeReport(r, layers) {
     coverage: r.stats,
     seam: r.seam,
     timings: r.timings, totalMs: r.totalMs,
-    resLines,
+    resLines: isRundum() ? summarizeShotRes(resLines) : resLines,
+    rundum: isRundum() ? { ...state.rundum.align, count: layers.length } : null,
     photos: layers.map((l) => `${kinds[l.kind]}: ${names[l.id]}`),
     date: new Date().toISOString(),
   };
+}
+
+function summarizeShotRes(lines) {
+  // alle Rundumfotos haben dieselbe Kamera – eine Zeile genügt
+  return lines.length ? [lines[0].replace('Rundumfoto:', `Rundumfotos (${lines.length}):`)] : [];
 }
 
 function renderReport(rep) {
@@ -483,10 +693,15 @@ function renderReport(rep) {
   const c = rep.coverage;
   box.replaceChildren(
     el('h3', {}, `Ergebnis ${rep.W} × ${rep.H}`),
-    el('ul', {},
-      el('li', {}, `Original Anker (Cockpit): ${fmtPct(c.anchor)} der Kugel`),
-      el('li', {}, `Original Inseln (ungefähre Lage): ${fmtPct(c.island)}`),
-      el('li', {}, `Aufgefüllt (nicht fotografiert, unscharf): ${fmtPct(c.fill)}`)),
+    rep.rundum
+      ? el('ul', {},
+          el('li', {}, `Originalfotos aus der Mitte (${rep.rundum.count} Rundumfotos): ${fmtPct(c.anchor)} der Kugel`),
+          el('li', {}, `Aufgefüllt (nicht fotografiert, unscharf): ${fmtPct(c.fill)}`),
+          rep.rundum.score != null ? el('li', {}, `Ausrichtung: Übereinstimmung ${fmtNum(rep.rundum.score, 2)}, Kamera-Sichtfeld ${fmtNum(rep.rundum.hfov, 1)}°` + (rep.rundum.weak && rep.rundum.weak.length ? `, schwach: ${rep.rundum.weak.join(', ')}` : '')) : null)
+      : el('ul', {},
+          el('li', {}, `Original Anker (Cockpit): ${fmtPct(c.anchor)} der Kugel`),
+          el('li', {}, `Original Inseln (ungefähre Lage): ${fmtPct(c.island)}`),
+          el('li', {}, `Aufgefüllt (nicht fotografiert, unscharf): ${fmtPct(c.fill)}`)),
     el('div', {}, el('b', {}, 'Auflösung je Foto')),
     el('ul', {}, ...rep.resLines.map((t) => el('li', {}, t)),
       el('li', {}, 'Aufgefüllte Bereiche: aus 1024 × 512 berechnet und weich vergrößert (keine echte Auflösung).')),
@@ -554,7 +769,8 @@ function go(page) {
     previewViewer.invalidate();
     if (!previewViewer.hasImage) schedulePreview(true);
     const s = selectedPhoto();
-    if (s) previewViewer.lookAt(s.params.yaw, s.params.pitch);
+    if (isRundum()) previewViewer.lookAt(0, -5);
+    else if (s) previewViewer.lookAt(s.params.yaw, s.params.pitch);
   }
   if (page === 'ansehen') resultViewer.invalidate();
   window.scrollTo(0, 0);
@@ -592,6 +808,14 @@ async function init() {
   ['dragleave', 'drop'].forEach((t) => document.addEventListener(t, (e) => { e.preventDefault(); drop.classList.remove('over'); }));
   document.addEventListener('drop', (e) => addFiles(e.dataTransfer.files));
   $('#btn-new').addEventListener('click', newVehicle);
+  capture = new SphereCapture($('#capture'), { onShot: addShot, onClose: onCaptureClosed, onStatus: setStatus });
+  $('#btn-capture').addEventListener('click', startCapture);
+  $('#btn-align-shots').addEventListener('click', alignRundum);
+  $('#btn-reset-rundum').addEventListener('click', () => {
+    const r = state.rundum;
+    Object.assign(r, { yaw: 0, pitch: 0, roll: 0, blendPower: 48 });
+    renderEditor(); schedulePreview(true); saveSoon();
+  });
 
   $('#sel-layer').addEventListener('change', (e) => {
     state.selected = e.target.value;
@@ -643,6 +867,7 @@ async function init() {
   state.title = proj.title || '';
   state.res = proj.res || 8192;
   state.quality = proj.quality || 96;
+  state.rundum = { ...DEFAULT_RUNDUM(), ...(proj.rundum || {}) };
   $('#inp-title').value = state.title;
   $('#sel-res').value = String(state.res);
   $('#inp-quality').value = String(state.quality);
@@ -671,7 +896,11 @@ async function init() {
   if ('serviceWorker' in navigator && location.protocol !== 'file:') {
     navigator.serviceWorker.register('sw.js').catch(() => {});
   }
-  window.__auto360 = { state, call, go, previewViewer, resultViewer };
+  // Test-Schnittstelle (wird von tests/e2e.mjs benutzt)
+  window.__auto360 = {
+    state, call, go, previewViewer, resultViewer, alignRundum,
+    addShots: async (list) => { for (const sh of list) await addShot(sh); await saveNow(); renderPhotos(); },
+  };
 }
 
 init();

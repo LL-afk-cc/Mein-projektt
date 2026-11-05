@@ -194,3 +194,75 @@ test('Anker-Vorschlag bevorzugt dunkles Bild mit hellem, farbigem Bildschirm', (
   };
   assert.equal(suggestAnchor([mk(false), mk(true), mk(false)]).index, 1);
 });
+
+// ---------------------------------------------------------------------------
+// Rundumaufnahme: Ausrichtung virtueller Aufnahmen einer bekannten Szene
+
+import { alignShots, anchorToSensor, rotDiffDeg, axisRot } from '../app/js/align.js';
+import { capturePlan, guessHfov } from '../app/js/capture-plan.js';
+import { renderViewFromEquirect } from '../app/js/compose.js';
+
+/** Prozedurale Innenraum-ähnliche Szene: Verläufe + viele Rechtecke/Linien (reproduzierbar). */
+function proceduralScene(W, H, seed = 3) {
+  let s = seed;
+  const rnd = () => ((s = (s * 16807) % 2147483647) / 2147483647);
+  const d = new Uint8ClampedArray(W * H * 4);
+  for (let y = 0; y < H; y++)
+    for (let x = 0; x < W; x++) {
+      const o = (y * W + x) * 4;
+      d[o] = 60 + (y / H) * 120; d[o + 1] = 60 + (x / W) * 80; d[o + 2] = 90; d[o + 3] = 255;
+    }
+  for (let k = 0; k < 900; k++) {
+    const w = 4 + rnd() * 60, h = 4 + rnd() * 40, x0 = rnd() * W, y0 = rnd() * H;
+    const c = [rnd() * 255, rnd() * 255, rnd() * 255];
+    for (let y = Math.floor(y0); y < Math.min(H, y0 + h); y++)
+      for (let x = Math.floor(x0); x < x0 + w; x++) {
+        const o = (y * W + (x % W)) * 4;
+        d[o] = c[0]; d[o + 1] = c[1]; d[o + 2] = c[2];
+      }
+  }
+  return { width: W, height: H, data: d };
+}
+
+test('Rundumaufnahme: Feinausrichtung findet Lage und Sichtfeld trotz Sensorfehlern', () => {
+  const scene = proceduralScene(1024, 512);
+  let seed = 11;
+  const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647) * 2 - 1;
+  const w = 240, h = 320, hfovTrue = guessHfov(w, h);
+  const truth = [], sensor = [], pyrs = [];
+  for (const t of capturePlan()) {
+    const R = rotationMatrix(t.yaw + rnd() * 5, t.pitch + rnd() * 3, rnd() * 2);
+    truth.push(R);
+    pyrs.push(new Pyramid(renderViewFromEquirect(scene, R, hfovTrue, w, h, { gain: [1 + rnd() * 0.1, 1 + rnd() * 0.1, 1 + rnd() * 0.1] })));
+    sensor.push(truth.length === 1 ? R : mul3(axisRot(1, rnd() * 3.5), mul3(axisRot(0, rnd() * 2), R)));
+  }
+  const err = (Rs) => {
+    const e = anchorToSensor(Rs, truth).map((R, i) => rotDiffDeg(R, truth[i]));
+    return { mean: e.reduce((a, b) => a + b) / e.length, max: Math.max(...e) };
+  };
+  const before = err(sensor);
+  const r = alignShots(pyrs, sensor, hfovTrue * 1.08);
+  const after = err(r.Rs);
+  assert.ok(before.mean > 1.2, 'Testaufbau: Sensorfehler groß genug ' + before.mean);
+  assert.ok(after.mean < 0.4, `Fehler nach Ausrichtung: mittel ${after.mean.toFixed(2)}° (vorher ${before.mean.toFixed(2)}°)`);
+  assert.ok(after.max < 1.0, `Fehler nach Ausrichtung: max ${after.max.toFixed(2)}°`);
+  close(r.hfov, hfovTrue, hfovTrue * 0.015, 'Sichtfeld');
+  assert.ok(r.score > 0.9, 'Übereinstimmung ' + r.score);
+  // Helligkeitsangleich: Gewinne liegen nahe dem Kehrwert der simulierten Belichtung (grob)
+  for (const g of r.gains) for (const c of g) assert.ok(c > 0.8 && c < 1.25, 'Gain ' + c);
+});
+
+test('Rundumfotos werden gewichtet überblendet und decken die Kugel vollständig', () => {
+  const scene = proceduralScene(512, 256, 5);
+  const w = 200, h = 266, hf = guessHfov(w, h);
+  const layers = capturePlan().map((t) => {
+    const R = rotationMatrix(t.yaw, t.pitch, 0);
+    return prepareLayer(new Pyramid(renderViewFromEquirect(scene, R, hf, w, h)), { ...DEFAULT_PARAMS, R, hfov: hf, feather: 0.02 }, 'shot', 512);
+  });
+  const out = renderPanorama(sortLayers(layers), computeFill(layers, 128, 64), 512, 256);
+  assert.ok(out.stats.fill < 0.01, 'Auffüllung ' + out.stats.fill);
+  let se = 0;
+  for (let i = 0; i < 512 * 256 * 4; i += 4) for (let k = 0; k < 3; k++) se += (out.data[i + k] - scene.data[i + k]) ** 2;
+  const psnr = 10 * Math.log10((255 * 255) / (se / (512 * 256 * 3)));
+  assert.ok(psnr > 24, 'PSNR zur Szene ' + psnr.toFixed(1));
+});

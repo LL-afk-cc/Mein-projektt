@@ -276,14 +276,12 @@ ${useLod ? `  dx = dFdx(uv); dy = dFdy(uv);
     let offset = null;
     this._gyroHandler = (e) => {
       if (e.alpha == null) return;
-      const M = deviceMatrix(e.alpha, e.beta, e.gamma, screenAngle());
-      // Spalten: rechts, oben, vorne (three.js-Welt → unsere Welt: z spiegeln)
-      const right = [M[0], M[3], -M[6]], upv = [M[1], M[4], -M[7]], fwd = [-M[2], -M[5], M[8]];
-      const fwdYaw = Math.atan2(fwd[0], fwd[2]) * 180 / Math.PI;
+      const C = deviceCameraR(e.alpha, e.beta, e.gamma, screenAngle());
+      const fwdYaw = Math.atan2(C[2], C[8]) * 180 / Math.PI;
       if (offset === null) offset = this.yaw - fwdYaw;
       const o = offset * Math.PI / 180, co = Math.cos(o), so = Math.sin(o);
       const ry = (v) => [co * v[0] + so * v[2], v[1], -so * v[0] + co * v[2]];
-      const r = ry(right), u = ry(upv), f = ry(fwd);
+      const r = ry([C[0], C[3], C[6]]), u = ry([C[1], C[4], C[7]]), f = ry([C[2], C[5], C[8]]);
       this.gyroMatrix = [r[0], u[0], f[0], r[1], u[1], f[1], r[2], u[2], f[2]];
       this.yaw = Math.atan2(f[0], f[2]) * 180 / Math.PI;
       this.pitch = Math.asin(Math.max(-1, Math.min(1, f[1]))) * 180 / Math.PI;
@@ -295,7 +293,19 @@ ${useLod ? `  dx = dFdx(uv); dy = dFdy(uv);
   }
 }
 
-function screenAngle() {
+/**
+ * Kamera-Drehmatrix (zeilenweise, unsere Konvention: Spalten = rechts, oben, Blickrichtung)
+ * der Rückkamera aus der Geräteausrichtung (deviceorientation alpha/beta/gamma, Grad).
+ * Hochkant gehalten und geradeaus gerichtet ergibt das Nick 0 / Roll 0.
+ */
+export function deviceCameraR(alpha, beta, gamma, orient = 0) {
+  const M = deviceMatrix(alpha, beta, gamma, orient);
+  // three.js-Welt → unsere Welt: z spiegeln; Kamera blickt in three.js entlang −z
+  const right = [M[0], M[3], -M[6]], up = [M[1], M[4], -M[7]], fwd = [-M[2], -M[5], M[8]];
+  return [right[0], up[0], fwd[0], right[1], up[1], fwd[1], right[2], up[2], fwd[2]];
+}
+
+export function screenAngle() {
   const o = (screen.orientation && screen.orientation.angle) ?? window.orientation ?? 0;
   return Number(o) || 0;
 }

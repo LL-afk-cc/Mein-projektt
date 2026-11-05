@@ -35,7 +35,7 @@ button[aria-pressed=true]{background:var(--acc);border-color:var(--acc)}
 </style></head><body>
 <canvas id="c"></canvas>
 <div class="title">${t}</div>
-<div class="legend" id="legend"><div><i style="background:#1ebe3c"></i>Originalfoto (Anker)</div><div><i style="background:#aad228"></i>Originalfoto (Insel, ungefähre Lage)</div><div><i style="background:#dc2828"></i>Aufgefüllt (nicht fotografiert)</div></div>
+<div class="legend" id="legend"><div><i style="background:#1ebe3c"></i>Originalfoto (Anker bzw. Rundumfoto)</div><div><i style="background:#aad228"></i>Originalfoto (Insel, ungefähre Lage)</div><div><i style="background:#dc2828"></i>Aufgefüllt (nicht fotografiert)</div></div>
 <div class="bar">
 <button id="rot" aria-pressed="false">Auto-Drehen</button>
 <button id="mask" aria-pressed="false">Herkunft</button>

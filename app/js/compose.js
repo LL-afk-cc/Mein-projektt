@@ -6,7 +6,7 @@
 //   cropX: Anteil (0..0.45), der am jeweiligen Rand weggeschnitten wird
 //   feather: Breite der weichen Randblende als Anteil der kürzeren Bildseite
 
-import { rotationMatrix, transpose3, focalFromHfov, smoothstep } from './math.js';
+import { rotationMatrix, transpose3, focalFromHfov, smoothstep, cameraPixelToDir } from './math.js';
 
 export const PROV_FILL = 0;
 export const PROV_ANCHOR = 1;
@@ -14,12 +14,15 @@ export const PROV_ISLAND = 2;
 
 /** Ebenenart → Herkunftscode. */
 export function provOf(kind) {
-  return kind === 'anchor' ? PROV_ANCHOR : PROV_ISLAND;
+  return kind === 'anchor' || kind === 'shot' ? PROV_ANCHOR : PROV_ISLAND;
 }
 
-/** Sortiert Ebenen nach Priorität: Anker zuerst, dann Inseln in ihrer Reihenfolge. */
+/**
+ * Sortiert Ebenen nach Priorität: Rundumfotos (werden untereinander gewichtet überblendet),
+ * dann Anker, dann Inseln in ihrer Reihenfolge.
+ */
 export function sortLayers(layers) {
-  const rank = { anchor: 0, island: 1 };
+  const rank = { shot: 0, anchor: 1, island: 2 };
   return layers.map((l, i) => [l, i]).sort((a, b) => rank[a[0].kind] - rank[b[0].kind] || a[1] - b[1]).map((x) => x[0]);
 }
 
@@ -27,6 +30,7 @@ export const DEFAULT_PARAMS = Object.freeze({
   hfov: 65, yaw: 0, pitch: -8, roll: 0,
   cropL: 0, cropR: 0, cropT: 0, cropB: 0,
   feather: 0.06, gain: [1, 1, 1],
+  blendPower: 48, // nur Rundumfotos: je höher, desto schmaler der Übergang zwischen zwei Fotos
 });
 
 /** Halbiert ein RGBA-Bild (2×2-Mittelwert). */
@@ -72,8 +76,11 @@ export function prepareLayer(pyramid, params, kind, panoW) {
   const level = ratio > 1 ? Math.max(0, Math.floor(Math.log2(ratio))) : 0;
   const img = pyramid.get(level);
   const w = img.width, h = img.height;
-  const R = rotationMatrix(p.yaw, p.pitch, p.roll);
+  // Rundumfotos bringen ihre Drehmatrix (Sensor bzw. Feinausrichtung) direkt mit
+  const R = p.R ? p.R : rotationMatrix(p.yaw, p.pitch, p.roll);
   const f = focalFromHfov(w, p.hfov);
+  // Grobe Ausdehnung auf der Kugel (für schnelle Vorauswahl je Kachel)
+  const halfDiag = Math.atan(Math.hypot(w / 2, h / 2) / f);
   const x0 = p.cropL * w, x1 = w - 1 - p.cropR * w;
   const y0 = p.cropT * h, y1 = h - 1 - p.cropB * h;
   const band = Math.max(1, p.feather * Math.min(w, h));
@@ -82,11 +89,13 @@ export function prepareLayer(pyramid, params, kind, panoW) {
     Rt: transpose3(R), f, cx: (w - 1) / 2, cy: (h - 1) / 2,
     x0, x1, y0, y1, band, gain: p.gain || [1, 1, 1], level,
     srcPxPerDeg, panoPxPerDeg,
+    axis: [R[2], R[5], R[8]], radius: halfDiag, blendPower: p.blendPower,
   };
 }
 
 /**
- * Tastet eine Ebene in Weltrichtung (dx,dy,dz) ab. Schreibt RGB nach out[0..2], gibt Alpha zurück.
+ * Tastet eine Ebene in Weltrichtung (dx,dy,dz) ab. Schreibt RGB nach out[0..2] und den Kosinus
+ * des Winkels zur Bildmitte nach out[3]; gibt die Deckkraft (Alpha) zurück.
  */
 export function sampleLayer(L, dx, dy, dz, out) {
   const Rt = L.Rt;
@@ -108,6 +117,7 @@ export function sampleLayer(L, dx, dy, dz, out) {
   const p00 = (yi * w + xi) * 4, p01 = p00 + 4, p10 = p00 + w * 4, p11 = p10 + 4;
   const w00 = (1 - fx) * (1 - fy), w01 = fx * (1 - fy), w10 = (1 - fx) * fy, w11 = fx * fy;
   const g = L.gain;
+  out[3] = cz; // Kosinus des Winkels zur Bildmitte (für Überblend-Gewichte)
   out[0] = (d[p00] * w00 + d[p01] * w01 + d[p10] * w10 + d[p11] * w11) * g[0];
   out[1] = (d[p00 + 1] * w00 + d[p01 + 1] * w01 + d[p10 + 1] * w10 + d[p11 + 1] * w11) * g[1];
   out[2] = (d[p00 + 2] * w00 + d[p01 + 2] * w01 + d[p10 + 2] * w10 + d[p11 + 2] * w11) * g[2];
@@ -131,32 +141,98 @@ export function trigTables(W, H) {
   return { sinLon, cosLon, sinLat, cosLat };
 }
 
+// ---------------------------------------------------------------------------
+// Pixel-Schattierung und Kachel-Vorauswahl
+
+const TILE = 32;
+
+/** Winkelradius einer Equirect-Kachel um ihre Mitte (aus Ecken und Kantenmitten). */
+function tileCandidates(layers, T, W, H, u0, v0, u1, v1) {
+  const cu = Math.min(W - 1, (u0 + u1) >> 1), cv = Math.min(H - 1, (v0 + v1) >> 1);
+  const cd = [T.cosLat[cv] * T.sinLon[cu], T.sinLat[cv], T.cosLat[cv] * T.cosLon[cu]];
+  let maxAng = 0;
+  for (const [u, v] of [[u0, v0], [u1 - 1, v0], [u0, v1 - 1], [u1 - 1, v1 - 1], [cu, v0], [cu, v1 - 1], [u0, cv], [u1 - 1, cv]]) {
+    const d = [T.cosLat[v] * T.sinLon[u], T.sinLat[v], T.cosLat[v] * T.cosLon[u]];
+    const dot = Math.max(-1, Math.min(1, d[0] * cd[0] + d[1] * cd[1] + d[2] * cd[2]));
+    maxAng = Math.max(maxAng, Math.acos(dot));
+  }
+  // Polkacheln überstreichen alle Längen – dann ist die Kachel „rund um den Pol“
+  if (v0 === 0 || v1 >= H) maxAng = Math.max(maxAng, Math.PI / 2 - Math.abs(Math.asin(T.sinLat[v0 === 0 ? v1 - 1 : v0])) + 0.02);
+  const out = [];
+  for (const L of layers) {
+    const dot = Math.max(-1, Math.min(1, L.axis[0] * cd[0] + L.axis[1] * cd[1] + L.axis[2] * cd[2]));
+    if (Math.acos(dot) <= L.radius + maxAng + 0.01) out.push(L);
+  }
+  return out;
+}
+
+/**
+ * Farbe einer Richtung aus den Ebenen-Kandidaten (Prioritätsreihenfolge).
+ * Rundumfotos ('shot') werden gewichtet überblendet (Gewicht = Alpha · cos(Winkel zur Bildmitte)^p),
+ * danach folgen Anker und Inseln als „darüberliegend“ (vorne zuerst).
+ * res = [r, g, b, deckkraft, herkunft]
+ */
+function shade(cands, dx, dy, dz, s, res) {
+  let acc = 0, r = 0, g = 0, b = 0, best = PROV_FILL, bestW = 0;
+  let k = 0;
+  // Gruppe der Rundumfotos
+  let ws = 0, sr = 0, sg = 0, sb = 0, amax = 0;
+  for (; k < cands.length && cands[k].kind === 'shot'; k++) {
+    const L = cands[k];
+    const a = sampleLayer(L, dx, dy, dz, s);
+    if (a <= 0) continue;
+    const w = a * Math.pow(Math.max(1e-4, s[3]), L.blendPower) + 1e-12;
+    ws += w; sr += w * s[0]; sg += w * s[1]; sb += w * s[2];
+    if (a > amax) amax = a;
+  }
+  if (amax > 0) {
+    r = amax * (sr / ws); g = amax * (sg / ws); b = amax * (sb / ws);
+    acc = amax; bestW = amax; best = PROV_ANCHOR;
+  }
+  for (; k < cands.length && acc < 0.9999; k++) {
+    const L = cands[k];
+    const a = sampleLayer(L, dx, dy, dz, s);
+    if (a <= 0) continue;
+    const wgt = (1 - acc) * a;
+    r += wgt * s[0]; g += wgt * s[1]; b += wgt * s[2];
+    acc += wgt;
+    if (wgt > bestW) { bestW = wgt; best = provOf(L.kind); }
+  }
+  res[0] = r; res[1] = g; res[2] = b; res[3] = acc; res[4] = best;
+}
+
+/** Läuft kachelweise über ein W×H-Equirect und ruft fn(u, v, cands, dx, dy, dz) auf. */
+function forEachTile(layers, W, H, T, fn, onTileRow) {
+  for (let v0 = 0; v0 < H; v0 += TILE) {
+    const v1 = Math.min(H, v0 + TILE);
+    for (let u0 = 0; u0 < W; u0 += TILE) {
+      const u1 = Math.min(W, u0 + TILE);
+      const cands = tileCandidates(layers, T, W, H, u0, v0, u1, v1);
+      for (let v = v0; v < v1; v++) {
+        const cl = T.cosLat[v], dy = T.sinLat[v];
+        for (let u = u0; u < u1; u++) fn(u, v, cands, cl * T.sinLon[u], dy, cl * T.cosLon[u]);
+      }
+    }
+    if (onTileRow) onTileRow(v1 / H);
+  }
+}
+
 /**
  * Bekannte (fotografierte) Farbe pro Pixel, vormultipliziert, plus Deckkraft.
- * Ebenen in Prioritätsreihenfolge (Anker zuerst). Für die Auffüll-Berechnung in niedriger Auflösung.
+ * Für die Auffüll-Berechnung in niedriger Auflösung.
  */
 export function renderKnown(layers, W, H) {
   const prem = new Float32Array(W * H * 3);
   const alpha = new Float32Array(W * H);
   const T = trigTables(W, H);
-  const s = [0, 0, 0];
-  for (let v = 0; v < H; v++) {
-    const cl = T.cosLat[v], dy = T.sinLat[v];
-    for (let u = 0; u < W; u++) {
-      const dx = cl * T.sinLon[u], dz = cl * T.cosLon[u];
-      const i = v * W + u;
-      let acc = 0, r = 0, g = 0, b = 0;
-      for (let k = 0; k < layers.length && acc < 0.999; k++) {
-        const a = sampleLayer(layers[k], dx, dy, dz, s);
-        if (a <= 0) continue;
-        const wgt = (1 - acc) * a;
-        r += wgt * s[0]; g += wgt * s[1]; b += wgt * s[2];
-        acc += wgt;
-      }
-      prem[i * 3] = r; prem[i * 3 + 1] = g; prem[i * 3 + 2] = b;
-      alpha[i] = acc;
-    }
-  }
+  const s = [0, 0, 0, 0], res = [0, 0, 0, 0, 0];
+  forEachTile(layers, W, H, T, (u, v, cands, dx, dy, dz) => {
+    if (!cands.length) return;
+    shade(cands, dx, dy, dz, s, res);
+    const i = v * W + u;
+    prem[i * 3] = res[0]; prem[i * 3 + 1] = res[1]; prem[i * 3 + 2] = res[2];
+    alpha[i] = res[3];
+  });
   return { prem, alpha, W, H };
 }
 
@@ -342,40 +418,29 @@ export function renderPanorama(layers, fill, W, H, opts = {}) {
   const provW = Math.floor(W / pScale), provH = Math.floor(H / pScale);
   const prov = new Uint8Array(provW * provH);
   const T = trigTables(W, H);
-  const s = [0, 0, 0], fc = [0, 0, 0];
+  const s = [0, 0, 0, 0], fc = [0, 0, 0], res = [0, 0, 0, 0, 0];
   const counts = [0, 0, 0];
   const t0 = Date.now();
-  for (let v = 0; v < H; v++) {
-    const cl = T.cosLat[v], dy = T.sinLat[v];
-    const pv = Math.floor(v / pScale), recordRow = v % pScale === 0 && pv < provH;
-    for (let u = 0; u < W; u++) {
-      const dx = cl * T.sinLon[u], dz = cl * T.cosLon[u];
-      let acc = 0, r = 0, g = 0, b = 0, best = PROV_FILL, bestW = 0;
-      for (let k = 0; k < layers.length && acc < 0.9999; k++) {
-        const a = sampleLayer(layers[k], dx, dy, dz, s);
-        if (a <= 0) continue;
-        const wgt = (1 - acc) * a;
-        r += wgt * s[0]; g += wgt * s[1]; b += wgt * s[2];
-        acc += wgt;
-        if (wgt > bestW) { bestW = wgt; best = provOf(layers[k].kind); }
-      }
-      if (acc < 0.9999) {
-        sampleFill(fill, u, v, W, H, fc);
-        const rest = 1 - acc;
-        r += rest * fc[0]; g += rest * fc[1]; b += rest * fc[2];
-      }
-      if (acc < 0.5) best = PROV_FILL;
-      const o = (v * W + u) * 4;
-      data[o] = r; data[o + 1] = g; data[o + 2] = b; data[o + 3] = 255;
-      counts[best]++;
-      if (recordRow && u % pScale === 0) {
-        const pu = Math.floor(u / pScale);
-        if (pu < provW) prov[pv * provW + pu] = best;
-      }
+  forEachTile(layers, W, H, T, (u, v, cands, dx, dy, dz) => {
+    let r = 0, g = 0, b = 0, acc = 0, best = PROV_FILL;
+    if (cands.length) {
+      shade(cands, dx, dy, dz, s, res);
+      r = res[0]; g = res[1]; b = res[2]; acc = res[3]; best = res[4];
     }
-    if (opts.onProgress && (v & 31) === 0) opts.onProgress(v / H, Date.now() - t0);
-  }
-  if (opts.onProgress) opts.onProgress(1, Date.now() - t0);
+    if (acc < 0.9999) {
+      sampleFill(fill, u, v, W, H, fc);
+      const rest = 1 - acc;
+      r += rest * fc[0]; g += rest * fc[1]; b += rest * fc[2];
+    }
+    if (acc < 0.5) best = PROV_FILL;
+    const o = (v * W + u) * 4;
+    data[o] = r; data[o + 1] = g; data[o + 2] = b; data[o + 3] = 255;
+    counts[best]++;
+    if (v % pScale === 0 && u % pScale === 0) {
+      const pu = u / pScale, pv = v / pScale;
+      if (pu < provW && pv < provH) prov[pv * provW + pu] = best;
+    }
+  }, (f) => opts.onProgress && opts.onProgress(f, Date.now() - t0));
   const total = W * H;
   return {
     data, prov, provW, provH,
@@ -385,6 +450,37 @@ export function renderPanorama(layers, fill, W, H, opts = {}) {
       fill: counts[PROV_FILL] / total,
     },
   };
+}
+
+/**
+ * Perspektivische Ansicht (Lochkamera) aus einem Equirect – z. B. für virtuelle Testaufnahmen.
+ * @param pano {width,height,data} Equirect-RGBA
+ */
+export function renderViewFromEquirect(pano, R, hfov, w, h, opts = {}) {
+  const out = new Uint8ClampedArray(w * h * 4);
+  const f = focalFromHfov(w, hfov);
+  const cx = (w - 1) / 2, cy = (h - 1) / 2;
+  const PW = pano.width, PH = pano.height, P = pano.data;
+  const gain = opts.gain || [1, 1, 1];
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const d = cameraPixelToDir(x, y, R, f, cx, cy);
+      let u = ((Math.atan2(d[0], d[2]) + Math.PI) / (2 * Math.PI)) * PW - 0.5;
+      let v = ((Math.PI / 2 - Math.asin(Math.max(-1, Math.min(1, d[1])))) / Math.PI) * PH - 0.5;
+      u = ((u % PW) + PW) % PW;
+      v = Math.max(0, Math.min(PH - 1.001, v));
+      const u0 = Math.floor(u), u1 = (u0 + 1) % PW, fu = u - u0;
+      const v0 = Math.floor(v), v1 = Math.min(PH - 1, v0 + 1), fv = v - v0;
+      const o = (y * w + x) * 4;
+      for (let k = 0; k < 3; k++) {
+        const c = (P[(v0 * PW + u0) * 4 + k] * (1 - fu) + P[(v0 * PW + u1) * 4 + k] * fu) * (1 - fv) +
+          (P[(v1 * PW + u0) * 4 + k] * (1 - fu) + P[(v1 * PW + u1) * 4 + k] * fu) * fv;
+        out[o + k] = c * gain[k];
+      }
+      out[o + 3] = 255;
+    }
+  }
+  return { width: w, height: h, data: out };
 }
 
 /** Herkunftsmaske als RGBA: Anker grün, Inseln gelbgrün, Auffüllung rot. */
@@ -425,7 +521,11 @@ export function seamCheck(rgba, W, H) {
     return Math.sqrt(Math.max(0, s2 / W - m * m));
   };
   const topStd = rowStd(0), bottomStd = rowStd(H - 1);
-  const ok = edge <= Math.max(2 * inner, 1) && topStd < 4 && bottomStd < 4;
+  // Pol: Aufgefüllt muss er einheitlich sein (< 4). Liegt dort echter Bildinhalt (Rundumfoto vom
+  // Boden), darf die Polzeile nicht unruhiger sein als der Ring ~2° daneben (sonst „Strudel“).
+  const k = Math.max(1, Math.ceil(H / 90));
+  const poleOk = (std, ringStd) => std < 4 || std <= 0.6 * ringStd;
+  const ok = edge <= Math.max(2 * inner, 1) && poleOk(topStd, rowStd(k)) && poleOk(bottomStd, rowStd(H - 1 - k));
   return { edgeDiff: edge, innerDiff: inner, topStd, bottomStd, ok };
 }
 

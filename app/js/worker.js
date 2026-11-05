@@ -7,15 +7,19 @@ import {
 } from './compose.js';
 import { estimateRoll, anchorScore } from './estimate.js';
 import { encodeJpeg, gpanoXmp } from './jpeg.js';
+import { alignShots } from './align.js';
 
 const MAX_SIDE = 4096;
+// Rundumfotos: 24 Stück müssen gleichzeitig in den Speicher passen (≈ 6 MB je Foto bei 1440 px).
+// 1080 px Breite bei ~53° Sichtfeld ≈ 20 px/° – das reicht für 8192er Panoramen (22,8 px/°) fast aus.
+const SHOT_MAX_SIDE = 1440;
 const images = new Map(); // id → Pyramid
 
 const post = (msg, transfer) => self.postMessage(msg, transfer || []);
 
-async function decode(blob) {
+async function decode(blob, maxSide = MAX_SIDE) {
   const bmp = await createImageBitmap(blob, { imageOrientation: 'from-image' });
-  const s = Math.min(1, MAX_SIDE / Math.max(bmp.width, bmp.height));
+  const s = Math.min(1, maxSide / Math.max(bmp.width, bmp.height));
   const w = Math.round(bmp.width * s), h = Math.round(bmp.height * s);
   const c = new OffscreenCanvas(w, h);
   const ctx = c.getContext('2d', { willReadFrequently: true });
@@ -57,9 +61,10 @@ async function downscaleBitmap(rgba, W, H, maxW) {
 }
 
 const handlers = {
-  async addImage({ id, blob }) {
-    const img = await decode(blob);
+  async addImage({ id, blob, shot }) {
+    const img = await decode(blob, shot ? SHOT_MAX_SIDE : MAX_SIDE);
     images.set(id, new Pyramid(img));
+    if (shot) return { id, width: img.width, height: img.height, score: 0, roll: { roll: 0, confidence: 0 } };
     const roll = estimateRoll(img);
     return { id, width: img.width, height: img.height, score: anchorScore(img), roll };
   },
@@ -80,6 +85,22 @@ const handlers = {
     const ov = footprintOverlaps(layers);
     const overlaps = layers.map((L, i) => ({ id: L.id, kind: L.kind, covered: ov[i].covered }));
     return { bitmap, mask, stats: r.stats, overlaps, _transfer: [bitmap, mask] };
+  },
+
+  async align({ shots, hfov }, reqId) {
+    const pyrs = shots.map((s) => {
+      const p = images.get(s.id);
+      if (!p) throw new Error('Foto fehlt im Rechenspeicher: ' + s.id);
+      return p;
+    });
+    const t0 = Date.now();
+    const r = alignShots(pyrs, shots.map((s) => s.R), hfov, {
+      onProgress: (f, label) => {
+        const el = Date.now() - t0;
+        post({ type: 'progress', reqId, label, frac: f, elapsedMs: el, etaMs: f > 0.05 ? (el / f) * (1 - f) : null });
+      },
+    });
+    return { ...r, ids: shots.map((s) => s.id), ms: Date.now() - t0 };
   },
 
   async build({ layers: specs, W, quality = 96, title = '', viewerMax = 4096 }, reqId) {

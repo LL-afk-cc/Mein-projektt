@@ -1,10 +1,10 @@
 // Offline-Unterstützung: App-Dateien werden zwischengespeichert.
 // Strategie „Netz zuerst, sonst Zwischenspeicher“ – Updates kommen sofort an, offline läuft die App weiter.
-const CACHE = 'auto360-v1';
+const CACHE = 'auto360-v2';
 const FILES = [
   './', 'index.html', 'styles.css', 'manifest.webmanifest',
   'icons/icon-192.png', 'icons/icon-512.png',
-  'js/app.js', 'js/compose.js', 'js/estimate.js', 'js/jpeg.js', 'js/math.js',
+  'js/app.js', 'js/align.js', 'js/capture.js', 'js/capture-plan.js', 'js/compose.js', 'js/estimate.js', 'js/jpeg.js', 'js/math.js',
   'js/store.js', 'js/viewer.js', 'js/viewer-export.js', 'js/worker.js',
 ];
 

@@ -20,11 +20,19 @@
   <main>
     <!-- 1 FOTOS -->
     <section class="page" id="page-fotos" data-page="fotos">
-      <div class="note">
-        <strong>Handy-Modus ohne KI.</strong> Echte Fotopixel werden in die 360°-Kugel gelegt.
-        Nicht fotografierte Richtungen werden nur unscharf farblich aufgefüllt (in der Herkunftsmaske rot).
+      <div class="card capture-card">
+        <div class="card-title">Empfohlen: Rundumaufnahme aus der Mitte</div>
+        <p>Handy hochkant zwischen den Vordersitzen auf Kopfhöhe halten und nur <b>drehen</b>.
+          Die App zeigt mit grünen Kreisen, wohin – und löst automatisch aus (24 Fotos, ca. 2–3 Minuten).
+          Ergebnis: ein vollständiges, scharfes 360°-Bild aus echten Fotos.</p>
+        <button class="btn primary big" id="btn-capture">Rundumaufnahme starten</button>
+        <p class="hint">Tipp: Kamera möglichst an derselben Stelle lassen (um das Objektiv drehen, nicht um den eigenen Körper). Ein Einbeinstativ zwischen den Sitzen hilft sehr.</p>
       </div>
-      <div class="row gap">
+      <div class="note">
+        <strong>Oder: vorhandene Einzelfotos</strong> (z. B. durch die Türen aufgenommen). Dabei wird nur das
+        Cockpit-Foto als Original in die Kugel gelegt; nicht fotografierte Richtungen werden unscharf aufgefüllt (rot in der Herkunftsmaske).
+      </div>
+      <div class="row gap wrap">
         <label class="btn primary">
           Fotos auswählen
           <input id="inp-files" type="file" accept="image/*" multiple hidden>
@@ -56,17 +64,35 @@
           <button class="chip" id="pv-look">Zum Foto drehen</button>
         </div>
       </div>
-      <label class="field">
-        <span>Foto bearbeiten</span>
-        <select id="sel-layer"></select>
-      </label>
-      <div id="layer-score" class="score"></div>
-      <div id="sliders" class="sliders"></div>
-      <div class="row gap wrap">
-        <button class="btn" id="btn-auto-roll">Neigung automatisch</button>
-        <button class="btn ghost" id="btn-reset-layer">Zurücksetzen</button>
+      <div id="single-editor">
+        <label class="field">
+          <span>Foto bearbeiten</span>
+          <select id="sel-layer"></select>
+        </label>
+        <div id="layer-score" class="score"></div>
+        <div id="sliders" class="sliders"></div>
+        <div class="row gap wrap">
+          <button class="btn" id="btn-auto-roll">Neigung automatisch</button>
+          <button class="btn ghost" id="btn-reset-layer">Zurücksetzen</button>
+        </div>
+        <p class="hint">Tipp: Zum Ausrichten mit zwei Fingern zoomen. Senkrechte Kanten (Mittelkonsole, A-Säule) sollten im Viewer senkrecht stehen.</p>
       </div>
-      <p class="hint">Tipp: Zum Ausrichten mit zwei Fingern zoomen. Senkrechte Kanten (Mittelkonsole, A-Säule) sollten im Viewer senkrecht stehen.</p>
+      <div id="rundum-editor" hidden>
+        <div id="align-summary" class="score"></div>
+        <div class="progress" id="align-progress" hidden>
+          <div class="progress-label"></div>
+          <div class="bar"><div class="fill"></div></div>
+          <div class="progress-meta"></div>
+        </div>
+        <div class="row gap wrap">
+          <button class="btn primary" id="btn-align-shots">Automatisch ausrichten</button>
+          <button class="btn ghost" id="btn-reset-rundum">Regler zurücksetzen</button>
+        </div>
+        <div class="group-title">Gesamtausrichtung</div>
+        <div id="rundum-sliders" class="sliders"></div>
+        <p class="hint">Im Viewer umsehen: Stehen Türkanten und Mittelkonsole senkrecht? Sonst „Horizont kippen“ anpassen.
+          Doppelte Kanten an Übergängen entstehen meist, wenn das Handy beim Drehen verschoben wurde.</p>
+      </div>
     </section>
 
     <!-- 3 ERSTELLEN -->
@@ -111,7 +137,7 @@
           </div>
         </div>
         <div class="legend" id="legend" hidden>
-          <span><i style="background:#1ebe3c"></i>Original (Anker)</span>
+          <span><i style="background:#1ebe3c"></i>Originalfoto (Anker bzw. Rundumfoto)</span>
           <span><i style="background:#aad228"></i>Original (Insel, ungefähre Lage)</span>
           <span><i style="background:#dc2828"></i>Aufgefüllt</span>
         </div>
@@ -126,6 +152,23 @@
       </div>
     </section>
   </main>
+
+  <!-- Aufnahme-Overlay (Rundumaufnahme) -->
+  <div id="capture" class="capture" hidden>
+    <video playsinline muted></video>
+    <canvas class="cap-overlay"></canvas>
+    <div class="cap-top">
+      <span class="cap-count">0 / 24</span>
+      <span class="cap-hint" role="status" aria-live="polite"></span>
+    </div>
+    <canvas class="cap-map" width="240" height="120" aria-label="Übersicht der Aufnahmerichtungen"></canvas>
+    <div class="cap-bottom">
+      <button class="btn cap-cancel">Abbrechen</button>
+      <button class="cap-shutter" aria-label="Auslösen"></button>
+      <button class="btn cap-done">Fertig</button>
+    </div>
+    <button class="chip cap-auto" aria-pressed="true">Auto-Auslösen</button>
+  </div>
 
   <nav class="tabs" aria-label="Schritte">
     <button data-go="fotos" class="active"><b>1</b>Fotos</button>
