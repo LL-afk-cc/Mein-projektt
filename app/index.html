@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#1d1f22">
+  <meta name="description" content="360°-Innenraumansicht aus normalen Verkaufsfotos – direkt auf dem Handy.">
+  <title>Auto360 Innenraum</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">Auto360 <span>Innenraum</span></div>
+    <div class="status" id="status" role="status" aria-live="polite"></div>
+  </header>
+
+  <main>
+    <!-- 1 FOTOS -->
+    <section class="page" id="page-fotos" data-page="fotos">
+      <div class="note">
+        <strong>Handy-Modus ohne KI.</strong> Echte Fotopixel werden in die 360°-Kugel gelegt.
+        Nicht fotografierte Richtungen werden nur unscharf farblich aufgefüllt (in der Herkunftsmaske rot).
+      </div>
+      <div class="row gap">
+        <label class="btn primary">
+          Fotos auswählen
+          <input id="inp-files" type="file" accept="image/*" multiple hidden>
+        </label>
+        <label class="btn">
+          Foto aufnehmen
+          <input id="inp-camera" type="file" accept="image/*" capture="environment" hidden>
+        </label>
+        <button class="btn ghost" id="btn-new">Neues Fahrzeug</button>
+      </div>
+      <div class="drop" id="drop">Fotos hierher ziehen (am Computer) oder oben auswählen.</div>
+      <div id="photos" class="photos"></div>
+      <p class="hint" id="anchor-hint"></p>
+      <details class="help">
+        <summary>Was bedeuten Anker und Insel?</summary>
+        <p><b>Anker</b> – das Cockpit-Gesamtfoto. Es wird ohne Neuzeichnung in die Kugel gelegt und hat die Ausrichtung „vorne“.</p>
+        <p><b>Insel</b> – weitere Fotos (Türen, Rückbank), über „Blick …“ einer Richtung zugeordnet. Sie wurden nicht aus der Mitte aufgenommen; ihre Lage ist daher nur <i>ungefähr</i> richtig. Sie füllen aber Flächen mit echten Stoffen statt Unschärfe. Überdecken sich Fotos, warnt die App vor möglichen Doppelungen.</p>
+        <p><b>Nahaufnahmen</b> (z. B. nur Lenkrad) bitte <i>nicht verwenden</i>: Sie sind von einem anderen Standpunkt aufgenommen und erzeugen sonst doppelte Lenkräder. Der Anker hat bei 8192 × 4096 bereits volle Originalauflösung.</p>
+      </details>
+    </section>
+
+    <!-- 2 AUSRICHTEN -->
+    <section class="page" id="page-ausrichten" data-page="ausrichten" hidden>
+      <div class="viewer-wrap">
+        <canvas id="cv-preview" class="viewer" aria-label="360°-Vorschau"></canvas>
+        <div class="viewer-overlay" id="preview-busy" hidden>Vorschau wird berechnet …</div>
+        <div class="viewer-tools">
+          <button class="chip" id="pv-mask" aria-pressed="false">Herkunft</button>
+          <button class="chip" id="pv-look">Zum Foto drehen</button>
+        </div>
+      </div>
+      <label class="field">
+        <span>Foto bearbeiten</span>
+        <select id="sel-layer"></select>
+      </label>
+      <div id="layer-score" class="score"></div>
+      <div id="sliders" class="sliders"></div>
+      <div class="row gap wrap">
+        <button class="btn" id="btn-auto-roll">Neigung automatisch</button>
+        <button class="btn ghost" id="btn-reset-layer">Zurücksetzen</button>
+      </div>
+      <p class="hint">Tipp: Zum Ausrichten mit zwei Fingern zoomen. Senkrechte Kanten (Mittelkonsole, A-Säule) sollten im Viewer senkrecht stehen.</p>
+    </section>
+
+    <!-- 3 ERSTELLEN -->
+    <section class="page" id="page-erstellen" data-page="erstellen" hidden>
+      <label class="field">
+        <span>Fahrzeug (für Dateinamen)</span>
+        <input id="inp-title" type="text" placeholder="z. B. VW Golf 7 Variant" autocomplete="off">
+      </label>
+      <label class="field">
+        <span>Auflösung</span>
+        <select id="sel-res">
+          <option value="8192">8192 × 4096 (empfohlen)</option>
+          <option value="4096">4096 × 2048 (schneller, weniger Speicher)</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>JPEG-Qualität: <b id="q-val">96</b></span>
+        <input id="inp-quality" type="range" min="90" max="98" step="1" value="96">
+      </label>
+      <div class="score mid" id="overlap-hint" hidden></div>
+      <button class="btn primary big" id="btn-build">360°-Ansicht erstellen</button>
+      <div class="progress" id="progress" hidden>
+        <div class="progress-label" id="prog-label"></div>
+        <div class="bar"><div class="fill" id="prog-fill"></div></div>
+        <div class="progress-meta"><span id="prog-pct"></span><span id="prog-eta"></span></div>
+        <button class="btn ghost" id="btn-cancel">Abbrechen</button>
+      </div>
+      <div id="report" class="report" hidden></div>
+    </section>
+
+    <!-- 4 ANSEHEN -->
+    <section class="page" id="page-ansehen" data-page="ansehen" hidden>
+      <div class="empty" id="no-result">Noch kein Ergebnis. Erst unter „Erstellen“ die 360°-Ansicht berechnen.</div>
+      <div id="result-area" hidden>
+        <div class="viewer-wrap tall">
+          <canvas id="cv-result" class="viewer" aria-label="360°-Ansicht"></canvas>
+          <div class="viewer-tools">
+            <button class="chip" id="rv-rotate" aria-pressed="false">Auto-Drehen</button>
+            <button class="chip" id="rv-mask" aria-pressed="false">Herkunft</button>
+            <button class="chip" id="rv-gyro" aria-pressed="false">Bewegung</button>
+            <button class="chip" id="rv-fs">Vollbild</button>
+          </div>
+        </div>
+        <div class="legend" id="legend" hidden>
+          <span><i style="background:#1ebe3c"></i>Original (Anker)</span>
+          <span><i style="background:#aad228"></i>Original (Insel, ungefähre Lage)</span>
+          <span><i style="background:#dc2828"></i>Aufgefüllt</span>
+        </div>
+        <div class="row gap wrap">
+          <button class="btn primary" id="btn-dl-jpg">JPEG speichern</button>
+          <button class="btn" id="btn-dl-html">Viewer-Datei speichern</button>
+          <button class="btn" id="btn-share">Teilen</button>
+          <button class="btn ghost" id="btn-dl-mask">Herkunftsmaske</button>
+          <button class="btn ghost" id="btn-show-2d">Als 2D-Bild</button>
+        </div>
+        <img id="img-2d" class="img2d" alt="Panorama als flaches Bild" hidden>
+      </div>
+    </section>
+  </main>
+
+  <nav class="tabs" aria-label="Schritte">
+    <button data-go="fotos" class="active"><b>1</b>Fotos</button>
+    <button data-go="ausrichten"><b>2</b>Ausrichten</button>
+    <button data-go="erstellen"><b>3</b>Erstellen</button>
+    <button data-go="ansehen"><b>4</b>Ansehen</button>
+  </nav>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

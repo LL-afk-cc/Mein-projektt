@@ -1,0 +1,42 @@
+# Veröffentlicht den Ordner app/ als Web-App auf GitHub Pages (HTTPS – nötig für Handy-Installation).
+# Einmalig aktivieren: Repository → Settings → Pages → Source: „GitHub Actions“.
+name: App veröffentlichen (GitHub Pages)
+
+on:
+  push:
+    branches: [main, master, claude/auto360-innenraum-panorama-1kj19i]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node --test tests/unit.test.mjs
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: app
+      - id: deployment
+        uses: actions/deploy-pages@v4

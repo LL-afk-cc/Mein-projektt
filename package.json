@@ -1,0 +1,11 @@
+{
+  "name": "auto360-innenraum",
+  "private": true,
+  "type": "module",
+  "description": "360°-Innenraumansicht aus Verkaufsfotos – Handy-Web-App (PWA)",
+  "scripts": {
+    "test": "node --test tests/unit.test.mjs",
+    "serve": "python3 -m http.server 8765 --directory app",
+    "e2e": "node tests/e2e.mjs"
+  }
+}
