@@ -192,6 +192,63 @@ ${useLod ? `  dx = dFdx(uv); dy = dFdy(uv);
     gl.uniform2f(this.uTan, ty * (w / h), ty);
     gl.uniform1f(this.uMaskA, this.maskOpacity);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    this._placeHotspots(R, ty * (w / h), ty);
+  }
+
+  /**
+   * Antippbare Punkte im 360°-Bild (z. B. „Lenkrad – Detailfoto“).
+   * list: [{ yaw, pitch, label, onClick }] – Richtung in Grad wie im Panorama (0/0 = Bildmitte).
+   */
+  setHotspots(list) {
+    if (!this._hsLayer) {
+      const layer = document.createElement('div');
+      layer.className = 'pano-hotspots';
+      layer.style.cssText = 'position:absolute;left:0;top:0;width:0;height:0;pointer-events:none;';
+      const host = this.canvas.parentElement;
+      if (getComputedStyle(host).position === 'static' && host !== document.body) host.style.position = 'relative';
+      host.appendChild(layer);
+      this._hsLayer = layer;
+    }
+    this._hsLayer.replaceChildren();
+    const D = Math.PI / 180;
+    this.hotspots = (list || []).map((h) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'pano-hotspot';
+      b.textContent = h.label;
+      b.style.cssText = 'position:absolute;transform:translate(-50%,-50%);pointer-events:auto;white-space:nowrap;' +
+        'background:rgba(20,20,20,.78);color:#fff;border:2px solid #2fd15a;border-radius:999px;padding:7px 12px;' +
+        'font:600 14px system-ui,sans-serif;box-shadow:0 0 0 4px rgba(47,209,90,.25);cursor:pointer;';
+      b.addEventListener('pointerdown', (e) => e.stopPropagation());
+      b.addEventListener('click', (e) => { e.stopPropagation(); h.onClick && h.onClick(h); });
+      this._hsLayer.appendChild(b);
+      const a = h.yaw * D, p = h.pitch * D;
+      return { ...h, el: b, dir: [Math.cos(p) * Math.sin(a), Math.sin(p), Math.cos(p) * Math.cos(a)] };
+    });
+    this.invalidate();
+  }
+
+  _placeHotspots(R, tx, ty) {
+    if (!this.hotspots || !this.hotspots.length) return;
+    const c = this.canvas;
+    const W = c.clientWidth, H = c.clientHeight, ox = c.offsetLeft, oy = c.offsetTop;
+    for (const h of this.hotspots) {
+      const d = h.dir;
+      // Kamera-Koordinaten = Rᵀ · d
+      const cx = R[0] * d[0] + R[3] * d[1] + R[6] * d[2];
+      const cy = R[1] * d[0] + R[4] * d[1] + R[7] * d[2];
+      const cz = R[2] * d[0] + R[5] * d[1] + R[8] * d[2];
+      const nx = cz > 0.05 ? cx / cz / tx : 9, ny = cz > 0.05 ? cy / cz / ty : 9;
+      const vis = Math.abs(nx) < 0.92 && Math.abs(ny) < 0.88;
+      h.el.style.display = vis ? '' : 'none';
+      if (vis) {
+        // Knopf ganz im Bild halten (Beschriftung nicht abschneiden)
+        const half = (h.el.offsetWidth || 0) / 2 + 6;
+        const x = Math.max(half, Math.min(W - half, ((nx + 1) / 2) * W));
+        h.el.style.left = (ox + x) + 'px';
+        h.el.style.top = (oy + ((1 - ny) / 2) * H) + 'px';
+      }
+    }
   }
 
   _loop(t) {
